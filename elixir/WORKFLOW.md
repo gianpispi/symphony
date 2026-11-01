@@ -28,6 +28,9 @@ hooks:
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
 agent:
+  # Use t3 for native T3 threads. See docs/t3.md for OAuth and project setup.
+  # T3 owns worktrees and setup; Symphony's workspace hooks apply only to codex.
+  backend: codex
   max_concurrent_agents: 10
   max_turns: 20
 codex:

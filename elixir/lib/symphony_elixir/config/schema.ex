@@ -150,6 +150,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
+      field(:backend, :string, default: "codex")
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
@@ -160,14 +161,56 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:backend, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
+      |> validate_inclusion(:backend, ["codex", "t3"])
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+    end
+  end
+
+  defmodule T3 do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @fields ~w(endpoint project_id base_ref state_dir credentials_file poll_interval_ms request_timeout_ms)a
+    @primary_key false
+    embedded_schema do
+      field(:endpoint, :string, default: "http://127.0.0.1:3773/mcp")
+      field(:project_id, :string)
+      field(:base_ref, :string, default: "HEAD")
+      field(:state_dir, :string, default: ".symphony-t3")
+      field(:credentials_file, :string, default: ".symphony-t3/oauth.json")
+      field(:poll_interval_ms, :integer, default: 2_000)
+      field(:request_timeout_ms, :integer, default: 15_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, @fields, empty_values: [])
+      |> validate_required([:endpoint, :base_ref, :state_dir, :credentials_file])
+      |> validate_number(:poll_interval_ms, greater_than: 0)
+      |> validate_number(:request_timeout_ms, greater_than: 0)
+      |> validate_change(:endpoint, fn :endpoint, value ->
+        uri = URI.parse(value)
+
+        secure_transport =
+          uri.scheme == "https" or
+            (uri.scheme == "http" and uri.host in ["localhost", "127.0.0.1", "::1"])
+
+        if secure_transport and is_binary(uri.host) and
+             is_nil(uri.userinfo) and is_nil(uri.query) and is_nil(uri.fragment) do
+          []
+        else
+          [endpoint: "must use HTTPS or loopback HTTP, without URL credentials, query or fragment"]
+        end
+      end)
     end
   end
 
@@ -296,6 +339,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:t3, T3, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -390,9 +434,28 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:t3, with: &T3.changeset/2)
+    |> validate_t3()
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+  end
+
+  defp validate_t3(changeset) do
+    if get_field(changeset, :agent).backend == "t3" do
+      cond do
+        get_field(changeset, :t3).project_id in [nil, ""] ->
+          add_error(changeset, :t3, "project_id is required for the t3 backend")
+
+        get_field(changeset, :worker).ssh_hosts != [] ->
+          add_error(changeset, :worker, "ssh_hosts cannot be used with the t3 backend")
+
+        true ->
+          changeset
+      end
+    else
+      changeset
+    end
   end
 
   defp finalize_settings(settings) do

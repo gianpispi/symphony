@@ -2310,3 +2310,30 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Appendix B. Native T3 backend extension
+
+The Elixir implementation supports `agent.backend: codex | t3`, defaulting to
+`codex`. This optional extension leaves tracker selection, scheduling, concurrency,
+retry backoff and workflow prompt rendering unchanged.
+
+For `t3`, the runner MUST create a native top-level T3 thread with a T3-managed Git
+worktree for each issue. Durable issue-ID mappings and request keys MUST survive
+worker retries and service restarts. The runner MUST NOT silently fall back to
+Codex, replace a missing thread, or send work in the project's root checkout.
+
+T3 owns provider sessions and interactive approvals. Symphony MUST report run
+progress and approval waits without answering approvals automatically. A human
+Stop MUST NOT cause immediate automatic resubmission. Terminal issue reconciliation
+MUST stop active and queued T3 work, including delegated tasks, while retaining the
+thread and worktree for review. Unreachable services prevent immediate cancellation;
+persisted stop intents MUST be retried when access returns.
+
+Symphony MUST NOT request merges or auto-merge. T3 runs start in approval-required
+mode with an explicit no-merge instruction. Human-approved commands and repository
+branch protections remain outside this runner's authority.
+
+T3 runtime configuration and OAuth setup are documented in `elixir/docs/t3.md`.
+Symphony's Codex workspace hooks and injected provider tools do not apply to T3;
+provider tools and worktree setup belong to the T3 project. SSH worker selection
+cannot be combined with this backend.

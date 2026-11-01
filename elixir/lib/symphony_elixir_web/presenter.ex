@@ -119,6 +119,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> Map.merge(t3_fields(entry))
   end
 
   defp retry_entry_payload(entry) do
@@ -168,7 +169,14 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
+    |> Map.merge(t3_fields(running))
   end
+
+  defp t3_fields(%{agent_backend: "t3"} = entry) do
+    %{agent_backend: "t3", t3_thread_id: Map.get(entry, :t3_thread_id), t3_thread_url: Map.get(entry, :t3_thread_url)}
+  end
+
+  defp t3_fields(_entry), do: %{}
 
   defp retry_issue_payload(retry) do
     %{

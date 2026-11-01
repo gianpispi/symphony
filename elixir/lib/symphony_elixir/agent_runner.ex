@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, PromptBuilder, T3Runner, Tracker, Workspace}
   alias SymphonyElixir.Tracker.Issue
 
   @type worker_host :: String.t() | nil
@@ -25,7 +25,18 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+    backend = Keyword.get(opts, :backend, Config.settings!().agent.backend)
+    runner = if backend == "t3", do: T3Runner, else: AppServer
+    opts = Keyword.put(opts, :runner, runner)
+
+    result =
+      if backend == "t3" do
+        run_codex_turns(nil, issue, codex_update_recipient, opts, nil)
+      else
+        run_on_worker_host(issue, codex_update_recipient, opts, worker_host)
+      end
+
+    case result do
       :ok ->
         :ok
 
@@ -89,20 +100,23 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    runner = Keyword.fetch!(opts, :runner)
+
+    with {:ok, session} <- runner.start_session(workspace, worker_host: worker_host, issue: issue) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
-        AppServer.stop_session(session)
+        runner.stop_session(session)
       end
     end
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    runner = Keyword.fetch!(opts, :runner)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           runner.run_turn(
              app_session,
              prompt,
              issue,
@@ -145,7 +159,7 @@ defmodule SymphonyElixir.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous Codex turn completed normally, but the tracker work item is still in an active state.
+    - The previous agent turn completed normally, but the tracker work item is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.

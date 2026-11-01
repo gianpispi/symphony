@@ -27,6 +27,9 @@ Tell your favorite coding agent to build Symphony in a programming language of y
 
 ### Option 2. Use our experimental reference implementation
 
+The Elixir implementation supports either direct Codex execution or native, interactive T3 Code
+threads. See [T3 backend setup](elixir/docs/t3.md) for T3-managed worktrees and human approvals.
+
 Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
 and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
 help with the setup:

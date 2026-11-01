@@ -160,6 +160,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="issue-stack">
                         <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a
+                          :if={external_issue_url(Map.get(entry, :t3_thread_url))}
+                          class="issue-link"
+                          href={external_issue_url(Map.get(entry, :t3_thread_url))}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >Open in T3 Code</a>
                       </div>
                     </td>
                     <td>

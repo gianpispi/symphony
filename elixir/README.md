@@ -35,6 +35,17 @@ issue claimed and exposes it as blocked in the runtime state, JSON API, and dash
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 tracker issue can become a dispatch candidate again after restart.
 
+## T3 Code backend
+
+Set `agent.backend: t3` to run issues in native T3 threads instead of direct Codex
+sessions. T3 owns worktrees, provider authentication and approvals. Symphony keeps
+its tracker, scheduling, concurrency and retry logic. Terminal issues stop their T3
+threads without deleting their worktrees; merges remain a human action.
+
+See [setup, configuration, recovery and the live demo](docs/t3.md). Existing
+workflows default to `agent.backend: codex`. The Codex-specific workspace cleanup
+and injected tracker tools described above apply only to that backend.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

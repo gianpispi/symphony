@@ -118,6 +118,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
     state = maybe_dispatch(state)
+    SymphonyElixir.T3Runner.reconcile_terminal()
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
@@ -560,6 +561,7 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
 
         stop_running_task(pid, ref, state.task_supervisor)
+        stop_t3_issue(issue_id, running_entry)
 
         if cleanup_workspace do
           cleanup_issue_workspace(Map.get(running_entry, :issue, identifier), running_entry)
@@ -638,6 +640,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # T3 owns provider timeouts; waiting for a human must never trigger Symphony's Codex stall restart.
+  defp stall_elapsed_ms(%{agent_backend: "t3"}, _now), do: 0
+
   defp stall_elapsed_ms(running_entry, now) do
     running_entry
     |> last_activity_timestamp()
@@ -655,6 +660,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
+
+  # The T3 monitor keeps approvals live in the app; a disconnect must reattach, not block dispatch forever.
+  defp input_required_blocker?(%{agent_backend: "t3"}), do: false
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
@@ -951,8 +959,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    backend = Config.settings!().agent.backend
+
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host, backend: backend)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -965,6 +975,7 @@ defmodule SymphonyElixir.Orchestrator do
             ref: ref,
             identifier: issue.identifier,
             issue: issue,
+            agent_backend: backend,
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
@@ -1135,29 +1146,63 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host \\ nil)
+  defp cleanup_issue_workspace(issue_or_identifier, metadata \\ nil) do
+    if Config.settings!().agent.backend == "t3" or
+         (is_map(metadata) and Map.get(metadata, :agent_backend) == "t3") do
+      case issue_or_identifier do
+        %Issue{id: id, identifier: identifier} -> stop_t3_issue(id, %{agent_backend: "t3", identifier: identifier})
+        _ -> :ok
+      end
+    else
+      cleanup_codex_workspace(issue_or_identifier, metadata)
+    end
+  end
 
-  defp cleanup_issue_workspace(issue_or_identifier, metadata) when is_map(metadata) do
+  # shortcut: backend changes require draining threads, pin routing per attempt before supporting live migration.
+  defp stop_t3_issue(issue_id, metadata) do
+    if Map.get(metadata, :agent_backend, Config.settings!().agent.backend) == "t3" do
+      case SymphonyElixir.T3Runner.stop_issue(issue_id) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          identifier = Map.get(metadata, :identifier, "unknown")
+          Logger.warning("T3 stop pending issue_id=#{issue_id} issue_identifier=#{identifier}: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
+  defp cleanup_codex_workspace(issue_or_identifier, metadata) when is_map(metadata) do
     case Map.get(metadata, :workspace_path) do
       workspace_path when is_binary(workspace_path) and workspace_path != "" ->
         Workspace.remove_recorded(workspace_path, Map.get(metadata, :worker_host))
 
       _ ->
-        cleanup_issue_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
+        cleanup_codex_workspace(issue_or_identifier, Map.get(metadata, :worker_host))
     end
   end
 
-  defp cleanup_issue_workspace(%Issue{} = issue, worker_host) do
+  defp cleanup_codex_workspace(%Issue{} = issue, worker_host) do
     Workspace.remove_issue_workspaces(issue, worker_host)
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
+  defp cleanup_codex_workspace(identifier, worker_host) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier, worker_host)
   end
 
-  defp cleanup_issue_workspace(_issue_or_identifier, _worker_host), do: :ok
+  defp cleanup_codex_workspace(_issue_or_identifier, _worker_host), do: :ok
 
   defp run_terminal_workspace_cleanup do
+    if Config.settings!().agent.backend == "t3" do
+      SymphonyElixir.T3Runner.reconcile_terminal()
+    else
+      run_codex_terminal_workspace_cleanup()
+    end
+  end
+
+  defp run_codex_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
       {:ok, issues} ->
         issues
@@ -1422,6 +1467,9 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
+          agent_backend: Map.get(metadata, :agent_backend, "codex"),
+          t3_thread_id: Map.get(metadata, :t3_thread_id),
+          t3_thread_url: Map.get(metadata, :t3_thread_url),
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
@@ -1515,10 +1563,14 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    payload = if is_map(update[:payload]), do: update[:payload], else: %{}
 
     {
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
+        t3_thread_id: Map.get(payload, :thread_id) || Map.get(running_entry, :t3_thread_id),
+        t3_thread_url: Map.get(payload, :thread_url) || Map.get(running_entry, :t3_thread_url),
+        workspace_path: Map.get(payload, :workspace_path) || Map.get(running_entry, :workspace_path),
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,

@@ -1072,6 +1072,14 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec humanize_codex_message(term()) :: String.t()
   def humanize_codex_message(nil), do: "no codex message yet"
 
+  def humanize_codex_message(%{event: event, message: %{backend: "t3"} = message}) do
+    case event do
+      :approval_required -> "T3 waiting for approval or input. Respond in T3 Code."
+      :t3_cancelled -> "T3 stopped by user. Resume the thread in T3 Code."
+      _ -> "T3 #{message[:run_status] || message[:status]}"
+    end
+  end
+
   def humanize_codex_message(%{event: event, message: message}) do
     payload = unwrap_codex_message_payload(message)
 
