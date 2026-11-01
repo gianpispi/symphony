@@ -1,0 +1,10 @@
+.git
+**/.symphony-t3
+**/.env*
+**/oauth.json
+**/__pycache__
+elixir/deps
+elixir/_build
+elixir/bin
+elixir/cover
+elixir/log
