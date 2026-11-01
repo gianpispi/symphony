@@ -13,11 +13,13 @@ RUN (getent group "$APP_GID" || groupadd --gid "$APP_GID" symphony) \
 
 WORKDIR /app
 COPY --chown=${APP_UID}:${APP_GID} elixir/ ./
+RUN chown "${APP_UID}:${APP_GID}" /app
 
 USER symphony
 ENV HOME=/home/symphony
 
-RUN mix local.hex --force \
+RUN test -w /app \
+ && mix local.hex --force \
  && mix local.rebar --force \
  && mix deps.get \
  && mix build
